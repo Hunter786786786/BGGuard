@@ -1,0 +1,6 @@
+id=bgguard
+name=BGGuard v2.0 - Smart App Manager
+version=v2.0.0
+versionCode=200
+author=BGGuard-Custom
+description=Whitelist via BGGuard app (auto-installed) | /proc only | 60s interval | CPU friendly

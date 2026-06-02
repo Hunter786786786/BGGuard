@@ -1,0 +1,133 @@
+#!/system/bin/sh
+# BGGuard Monitor v2.0
+
+D="/data/adb/bgguard"
+LOG="$D/logs/bgguard.log"
+KLOG="$D/logs/killed.log"
+CONF="$D/whitelist.conf"
+PID_F="$D/service.pid"
+BGT="$D/bg_tracker"
+ACT="$D/active_tracker"
+REFRESH=10
+
+R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'
+B='\033[1;34m'; C='\033[0;36m'; W='\033[1;37m'
+DK='\033[0;90m'; NC='\033[0m'
+
+load_wl() {
+    WL=""
+    [ -f "$CONF" ] || return
+    while IFS= read -r line; do
+        echo "$line" | grep -qE '^\s*#|^\s*$' && continue
+        local p; p=$(echo "$line" | tr -d ' \r\n')
+        [ -n "$p" ] && WL="$WL $p"
+    done < "$CONF"
+}
+
+get_pid_proc() {
+    for d in /proc/[0-9]*/; do
+        [ -f "${d}cmdline" ] || continue
+        local cmd; cmd=$(cat "${d}cmdline" 2>/dev/null | tr '\0' '\n' | head -1)
+        if [ "$cmd" = "$1" ]; then local p="${d%/}"; echo "${p##*/}"; return; fi
+    done
+}
+
+get_oom()    { [ -n "$1" ] && cat "/proc/$1/oom_score_adj" 2>/dev/null || echo "N/A"; }
+get_mem_mb() { local kb; kb=$(grep VmRSS "/proc/${1:-x}/status" 2>/dev/null | awk '{print $2}'); echo "$(( ${kb:-0} / 1024 ))"; }
+mem_total()  { grep MemTotal /proc/meminfo | awk '{print int($2/1024)}'; }
+mem_avail()  { grep MemAvailable /proc/meminfo | awk '{print int($2/1024)}'; }
+
+get_fg() {
+    dumpsys activity activities 2>/dev/null \
+        | grep "mResumedActivity" \
+        | grep -oE '[a-zA-Z][a-zA-Z0-9._]+/[a-zA-Z0-9._]+' \
+        | head -1 | cut -d'/' -f1
+}
+
+draw() {
+    clear
+    load_wl
+    local now_ts; now_ts=$(date +%s)
+    local total avail used pct fg dp
+    total=$(mem_total); avail=$(mem_avail)
+    used=$(( total - avail )); pct=$(( used * 100 / total ))
+    fg=$(get_fg)
+
+    printf "${W}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf "${W}  BGGuard v2.0${NC}  ${DK}%s${NC}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf "${W}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+
+    local spid; spid=$(cat "$PID_F" 2>/dev/null)
+    if [ -n "$spid" ] && kill -0 "$spid" 2>/dev/null; then
+        printf " ${G}● Daemon RUNNING${NC}  ${DK}PID:%s${NC}\n" "$spid"
+    else
+        printf " ${R}✖ Daemon STOPPED${NC}\n"
+    fi
+    printf " ${DK}RAM:%dMB/%dMB(%d%%) | FG:${C}%s${NC}\n" "$used" "$total" "$pct" "${fg:-?}"
+
+    printf "\n${Y}━━ 🔒 PROTECTED APPS (%d) ━━━━━━━━━━━━━━━━━━━━${NC}\n" \
+        "$(echo $WL | tr ' ' '\n' | grep -c '[a-z]')"
+
+    for pkg in $WL; do
+        [ -z "$pkg" ] && continue
+        local pid; pid=$(get_pid_proc "$pkg")
+        if [ -n "$pid" ]; then
+            local oom; oom=$(get_oom "$pid")
+            local mem; mem=$(get_mem_mb "$pid")
+            if echo "$oom" | grep -qE '^-[89][0-9][0-9]$|^-1000$'; then
+                printf " ${G}✅ %-38s${NC} PID:${W}%-6s${NC} OOM:${C}%-5s${NC} RAM:${W}%sMB${NC}\n" \
+                    "$pkg" "$pid" "$oom" "$mem"
+            else
+                printf " ${Y}⚠️  %-38s${NC} PID:${W}%-6s${NC} OOM:${Y}%-5s${NC} RAM:${W}%sMB${NC}\n" \
+                    "$pkg" "$pid" "$oom" "$mem"
+            fi
+        else
+            printf " ${DK}💤 %-38s (not running)${NC}\n" "$pkg"
+        fi
+    done
+
+    printf "\n${Y}━━ ⏱️  BG KILL TRACKER ━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    local cnt=0
+    for f in "$BGT"/*; do
+        [ -f "$f" ] || continue
+        local pkg; pkg=$(basename "$f")
+        local bg_s; bg_s=$(cat "$f" 2>/dev/null || echo "$now_ts")
+        local el=$(( now_ts - bg_s ))
+        local rm=$(( 120 - el )); [ $rm -lt 0 ] && rm=0
+        local pb=$(( el * 16 / 120 )); [ $pb -gt 16 ] && pb=16
+        local bar="" i=0
+        while [ $i -lt $pb ]; do bar="${bar}█"; i=$(( i+1 )); done
+        local j=0 em=$(( 16 - pb ))
+        while [ $j -lt $em ]; do bar="${bar}░"; j=$(( j+1 )); done
+        [ $rm -le 15 ] \
+            && printf " ${R}⚠️  %-30s [%s] %ds${NC}\n" "$pkg" "$bar" "$rm" \
+            || printf " ${DK}   %-30s [%s] %ds${NC}\n" "$pkg" "$bar" "$rm"
+        cnt=$(( cnt + 1 ))
+    done
+    [ $cnt -eq 0 ] && printf " ${DK}(No background apps tracked)${NC}\n"
+
+    printf "\n${W}━━ 📋 RECENT EVENTS ━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    [ -f "$KLOG" ] && tail -5 "$KLOG" | while IFS= read -r line; do
+        echo "$line" | grep -q "\[KILL\]" \
+            && printf " ${R}%s${NC}\n" "$line" \
+            || printf " ${C}%s${NC}\n" "$line"
+    done || printf " ${DK}(No events)${NC}\n"
+
+    local kills cleans
+    kills=$(grep -c "\[KILL\]" "$KLOG" 2>/dev/null || echo 0)
+    cleans=$(grep -c "\[CLEAN\]" "$KLOG" 2>/dev/null || echo 0)
+    printf "\n ${R}Kills:%s${NC}  ${C}Cleans:%s${NC}\n" "$kills" "$cleans"
+    printf "${W}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf " ${DK}Ctrl+C exit | %ds | bgconfig=settings${NC}\n" "$REFRESH"
+    printf "${W}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+}
+
+case "$1" in
+    --snap|-s)  draw ;;
+    --log|-l)   tail -f "$LOG" ;;
+    --kills|-k) cat "$KLOG" 2>/dev/null || echo "(empty)" ;;
+    ""|--live)
+        trap 'exit 0' INT TERM
+        while true; do draw; sleep $REFRESH; done ;;
+    *) echo "Usage: bgmon [--snap|--log|--kills]" ;;
+esac

@@ -1,0 +1,283 @@
+#!/system/bin/sh
+# ═══════════════════════════════════════════════════════════
+#  bgconfig — BGGuard App Manager
+#  Termux এ চালান: su -c bgconfig
+#  অথবা: su -c "sh /data/local/tmp/bgconfig"
+# ═══════════════════════════════════════════════════════════
+
+CONF="/data/adb/bgguard/whitelist.conf"
+D="/data/adb/bgguard"
+
+R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'
+B='\033[1;34m'; C='\033[0;36m'; W='\033[1;37m'
+M='\033[0;35m'; DK='\033[0;90m'; NC='\033[0m'
+
+mkdir -p "$D"
+
+# Whitelist load
+load_wl() {
+    WL=""
+    [ -f "$CONF" ] || return
+    while IFS= read -r line; do
+        echo "$line" | grep -qE '^\s*#|^\s*$' && continue
+        local p; p=$(echo "$line" | tr -d ' \r\n')
+        [ -n "$p" ] && WL="$WL $p"
+    done < "$CONF"
+}
+
+# Whitelist save
+save_wl() {
+    {
+        echo "# BGGuard Whitelist — $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "# এই apps কখনো background kill হবে না"
+        echo "#"
+        for p in $WL; do
+            echo "$p"
+        done
+    } > "$CONF"
+}
+
+is_in_wl() {
+    local pkg="$1"
+    for p in $WL; do [ "$p" = "$pkg" ] && return 0; done
+    return 1
+}
+
+add_to_wl()  { is_in_wl "$1" || WL="$WL $1"; }
+rem_from_wl() { WL=$(echo "$WL" | tr ' ' '\n' | grep -v "^$1$" | tr '\n' ' '); }
+
+# সব installed user apps
+get_all_apps() {
+    pm list packages -3 2>/dev/null | sed 's/^package://' | sort
+}
+
+# App label (নাম) বের করার চেষ্টা
+get_label() {
+    local pkg="$1"
+    # APK এর label বের করা কঠিন shell এ, তাই শুধু package name দেখাই
+    # কিন্তু কিছু common app এর নাম জানি
+    case "$pkg" in
+        net.jahez.fleets)          echo "Jahez Fleets" ;;
+        io.suqi8.saned)            echo "Saned" ;;
+        hamba.allah.swu)           echo "Hamba Allah" ;;
+        com.google.android.apps.maps) echo "Google Maps" ;;
+        com.termux)                echo "Termux" ;;
+        com.whatsapp)              echo "WhatsApp" ;;
+        org.telegram.messenger)    echo "Telegram" ;;
+        com.instagram.android)     echo "Instagram" ;;
+        com.facebook.katana)       echo "Facebook" ;;
+        com.nubia.tgkservice)      echo "Nubia TGK" ;;
+        *)                         echo "$pkg" ;;
+    esac
+}
+
+# ── Header ────────────────────────────────────────────────
+draw_header() {
+    clear
+    printf "${W}╔══════════════════════════════════════════════╗${NC}\n"
+    printf "${W}║${NC}  ${C}BGGuard${NC} ${W}v2.0 — App Manager${NC}              ${W}║${NC}\n"
+    printf "${W}║${NC}  ${DK}Whitelist = Background এ থাকবে (kill নয়)${NC}  ${W}║${NC}\n"
+    printf "${W}╚══════════════════════════════════════════════╝${NC}\n\n"
+}
+
+# ── Main Menu ─────────────────────────────────────────────
+main_menu() {
+    while true; do
+        draw_header
+        local wl_count; wl_count=$(echo "$WL" | tr ' ' '\n' | grep -v '^$' | wc -l)
+        printf " ${Y}Whitelisted apps: %s${NC}\n\n" "$wl_count"
+        printf " ${W}1.${NC} 📋 সব apps দেখুন ও whitelist সেট করুন\n"
+        printf " ${W}2.${NC} ✅ Whitelist দেখুন (protected apps)\n"
+        printf " ${W}3.${NC} ➕ Package name দিয়ে directly add করুন\n"
+        printf " ${W}4.${NC} ➖ Whitelist থেকে remove করুন\n"
+        printf " ${W}5.${NC} 💾 Save করুন ও daemon reload করুন\n"
+        printf " ${W}6.${NC} 📊 BGGuard status দেখুন\n"
+        printf " ${W}7.${NC} 🚪 বের হন\n"
+        printf "\n ${DK}Choice: ${NC}"
+        read -r choice
+        case "$choice" in
+            1) browse_apps ;;
+            2) show_whitelist ;;
+            3) add_manual ;;
+            4) remove_menu ;;
+            5) save_and_reload ;;
+            6) show_status ;;
+            7) printf "\n${G}Saved & exiting...${NC}\n"; save_wl; exit 0 ;;
+            *) printf "${R}Invalid!${NC}\n"; sleep 1 ;;
+        esac
+    done
+}
+
+# ── App Browser ──────────────────────────────────────────
+browse_apps() {
+    draw_header
+    printf " ${Y}⏳ App list লোড হচ্ছে...${NC}\n"
+    local apps; apps=$(get_all_apps)
+    local total; total=$(echo "$apps" | wc -l)
+
+    local page=0
+    local per_page=10
+
+    while true; do
+        draw_header
+        local start=$(( page * per_page + 1 ))
+        local end=$(( (page + 1) * per_page ))
+        [ $end -gt $total ] && end=$total
+
+        printf " ${W}Apps %d-%d / %d${NC}  ${DK}[N=next P=prev Q=back]${NC}\n\n" "$start" "$end" "$total"
+
+        local i=0 idx=0
+        echo "$apps" | while IFS= read -r pkg; do
+            idx=$(( idx + 1 ))
+            [ $idx -lt $start ] && continue
+            [ $idx -gt $end ] && break
+            i=$(( i + 1 ))
+
+            local label; label=$(get_label "$pkg")
+            if is_in_wl "$pkg"; then
+                printf " ${G}[✅]${NC} ${W}%2d.${NC} %-25s ${DK}%s${NC}\n" "$i" "$label" "$pkg"
+            else
+                printf " ${R}[  ]${NC} ${W}%2d.${NC} %-25s ${DK}%s${NC}\n" "$i" "$label" "$pkg"
+            fi
+        done
+
+        printf "\n ${DK}Number দিয়ে toggle করুন, N/P/Q: ${NC}"
+        read -r inp
+
+        case "$inp" in
+            [Nn]) [ $end -lt $total ] && page=$(( page + 1 )) ;;
+            [Pp]) [ $page -gt 0 ] && page=$(( page - 1 )) ;;
+            [Qq]) return ;;
+            ''|*[!0-9]*)
+                printf "${R}Number অথবা N/P/Q দিন${NC}\n"; sleep 1 ;;
+            *)
+                # Toggle selected app
+                local sel_idx=$(( page * per_page + inp ))
+                local sel_pkg; sel_pkg=$(echo "$apps" | sed -n "${sel_idx}p")
+                if [ -n "$sel_pkg" ]; then
+                    if is_in_wl "$sel_pkg"; then
+                        rem_from_wl "$sel_pkg"
+                        printf "\n ${R}❌ Removed: %s${NC}\n" "$sel_pkg"
+                    else
+                        add_to_wl "$sel_pkg"
+                        printf "\n ${G}✅ Added: %s${NC}\n" "$sel_pkg"
+                    fi
+                    sleep 1
+                fi
+                ;;
+        esac
+    done
+}
+
+# ── Whitelist দেখুন ──────────────────────────────────────
+show_whitelist() {
+    draw_header
+    printf " ${G}✅ Whitelisted Apps (kill হবে না):${NC}\n\n"
+    local i=0
+    for p in $WL; do
+        [ -z "$p" ] && continue
+        i=$(( i + 1 ))
+        local label; label=$(get_label "$p")
+        # Check if running
+        local pid; pid=$(pidof "$p" 2>/dev/null | awk '{print $1}')
+        if [ -n "$pid" ]; then
+            local oom; oom=$(cat "/proc/$pid/oom_score_adj" 2>/dev/null || echo "?")
+            printf " ${G}%2d. %-22s${NC} ${DK}%-35s${NC} ${C}PID:%-6s OOM:%s${NC}\n" \
+                "$i" "$label" "$p" "$pid" "$oom"
+        else
+            printf " ${Y}%2d. %-22s${NC} ${DK}%-35s${NC} ${R}(not running)${NC}\n" \
+                "$i" "$label" "$p"
+        fi
+    done
+    [ $i -eq 0 ] && printf " ${R}(Empty — কোনো app whitelisted নেই)${NC}\n"
+    printf "\n ${DK}Enter চাপুন...${NC}"; read -r _
+}
+
+# ── Manual Add ────────────────────────────────────────────
+add_manual() {
+    draw_header
+    printf " ${W}Package name দিন (যেমন: com.whatsapp):${NC}\n > "
+    read -r pkg
+    [ -z "$pkg" ] && return
+    if pm path "$pkg" >/dev/null 2>&1; then
+        add_to_wl "$pkg"
+        printf "\n ${G}✅ Added: %s${NC}\n" "$pkg"
+    else
+        printf "\n ${Y}⚠️  App পাওয়া গেলো না, তবুও add করবেন? (y/n): ${NC}"
+        read -r yn
+        [ "$yn" = "y" ] || [ "$yn" = "Y" ] && add_to_wl "$pkg" && \
+            printf " ${G}✅ Added: %s${NC}\n" "$pkg"
+    fi
+    sleep 1
+}
+
+# ── Remove Menu ───────────────────────────────────────────
+remove_menu() {
+    draw_header
+    printf " ${W}Remove করার app এর number দিন:${NC}\n\n"
+    local i=0 arr=""
+    for p in $WL; do
+        [ -z "$p" ] && continue
+        i=$(( i + 1 ))
+        printf " ${R}%2d.${NC} %s\n" "$i" "$p"
+        arr="$arr $p"
+    done
+    [ $i -eq 0 ] && { printf " ${DK}(Empty)${NC}\n"; sleep 1; return; }
+    printf "\n ${DK}Number (0=cancel): ${NC}"
+    read -r n
+    [ -z "$n" ] || [ "$n" = "0" ] && return
+    local sel; sel=$(echo "$arr" | tr ' ' '\n' | grep -v '^$' | sed -n "${n}p")
+    [ -n "$sel" ] && rem_from_wl "$sel" && printf "\n ${G}Removed: %s${NC}\n" "$sel"
+    sleep 1
+}
+
+# ── Save & Reload ─────────────────────────────────────────
+save_and_reload() {
+    save_wl
+    printf "\n ${G}✅ Saved: %s${NC}\n" "$CONF"
+    # Daemon reload signal
+    local pid; pid=$(cat "$D/service.pid" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill -HUP "$pid" 2>/dev/null || true
+        printf " ${G}✅ Daemon reload signal sent${NC}\n"
+    else
+        printf " ${Y}⚠️  Daemon চলছে না — Reboot করুন${NC}\n"
+    fi
+    sleep 2
+}
+
+# ── Status ────────────────────────────────────────────────
+show_status() {
+    draw_header
+    local pid; pid=$(cat "$D/service.pid" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        printf " ${G}● Daemon RUNNING  PID:%s${NC}\n" "$pid"
+    else
+        printf " ${R}✖ Daemon STOPPED${NC}\n"
+    fi
+
+    local total_kb avail_kb
+    total_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    avail_kb=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    local used_mb=$(( (total_kb - avail_kb) / 1024 ))
+    local total_mb=$(( total_kb / 1024 ))
+    printf " ${DK}RAM: %dMB / %dMB${NC}\n\n" "$used_mb" "$total_mb"
+
+    printf " ${Y}Protected Apps:${NC}\n"
+    for p in $WL; do
+        [ -z "$p" ] && continue
+        local pid2; pid2=$(pidof "$p" 2>/dev/null | awk '{print $1}')
+        [ -n "$pid2" ] && printf " ${G} ✅ %s (PID:%s)${NC}\n" "$p" "$pid2" \
+                       || printf " ${DK}    %s (not running)${NC}\n" "$p"
+    done
+
+    local kills cleans
+    kills=$(grep -c "\[KILL\]" "$D/logs/killed.log" 2>/dev/null || echo 0)
+    cleans=$(grep -c "\[CLEAN\]" "$D/logs/killed.log" 2>/dev/null || echo 0)
+    printf "\n ${R}Total Kills: %s${NC}   ${C}Footprint Cleans: %s${NC}\n" "$kills" "$cleans"
+    printf "\n ${DK}Enter...${NC}"; read -r _
+}
+
+# ── Start ─────────────────────────────────────────────────
+load_wl
+main_menu

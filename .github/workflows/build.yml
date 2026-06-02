@@ -1,0 +1,89 @@
+name: Build BGGuard Module (App + Module)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:        # ← Actions ট্যাবে "Run workflow" চাপলেই সব build হবে
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.5'
+
+      - name: Generate Gradle Wrapper
+        run: gradle wrapper --gradle-version 8.5 --no-daemon
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Package Module with APK inside
+        run: |
+          echo "━━━ Module তৈরি হচ্ছে ━━━"
+          # APK কে module ফোল্ডারে কপি করি
+          cp app/build/outputs/apk/debug/app-debug.apk module/BGGuard.apk
+          echo "APK size: $(du -h module/BGGuard.apk | cut -f1)"
+
+          # Module ফোল্ডারের ভেতরে গিয়ে zip বানাই (সব ফাইল root level এ থাকবে)
+          cd module
+          zip -r ../BGGuard-Module.zip . -x ".*"
+          cd ..
+
+          echo "━━━ Module zip তৈরি ━━━"
+          unzip -l BGGuard-Module.zip
+
+      - name: Upload Module ZIP (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: BGGuard-Module
+          path: BGGuard-Module.zip
+          retention-days: 30
+
+      - name: Also upload standalone APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BGGuard-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: Create Release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.0-${{ github.run_number }}
+          name: BGGuard v2.0 (Build ${{ github.run_number }})
+          body: |
+            ## BGGuard v2.0 — সম্পূর্ণ প্যাকেজ
+
+            **BGGuard-Module.zip** ফাইলটি ডাউনলোড করুন।
+
+            এই একটা zip এর ভেতরেই আছে:
+            - ✅ BGGuard module (background protection)
+            - ✅ BGGuard app (auto-install হবে flash করলে)
+            - ✅ bgmon ও bgconfig commands
+
+            ### ইন্সটল:
+            1. SukiSU Ultra → Install from storage → এই zip সিলেক্ট
+            2. Reboot করুন
+            3. BGGuard app আপনাআপনি ইন্সটল হয়ে যাবে — খুলে টিক দিন
+          files: |
+            BGGuard-Module.zip
+            app/build/outputs/apk/debug/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
